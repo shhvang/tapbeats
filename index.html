@@ -167,8 +167,8 @@
         /* Beat Pad Card */
         .beat-pad-card {
             background: var(--card-bg);
-            backdrop-filter: blur(10px);
-            -webkit-backdrop-filter: blur(10px);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
             border-radius: 24px;
             border: 1px solid var(--border-color);
             padding: 30px;
@@ -191,6 +191,8 @@
             border-radius: 16px;
             cursor: pointer;
             transition: all 0.15s ease;
+            /* Hint to browser to optimise for transform/background changes for smoother animation */
+            will-change: transform, background;
             position: relative;
             overflow: hidden;
             display: flex;
@@ -252,8 +254,8 @@
 
         .dock {
             background: var(--dock-bg);
-            backdrop-filter: blur(10px);
-            -webkit-backdrop-filter: blur(10px);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
             border: 1px solid var(--border-color);
             border-radius: 20px;
             padding: 12px 20px;
@@ -289,6 +291,8 @@
             justify-content: center;
             cursor: pointer;
             transition: all 0.3s ease;
+            /* Optimise button animations */
+            will-change: transform, background;
             font-size: 18px;
             color: var(--text-color);
             position: relative;
@@ -334,8 +338,8 @@
             left: 0;
             right: 0;
             background: var(--dock-bg);
-            backdrop-filter: blur(10px);
-            -webkit-backdrop-filter: blur(10px);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
             border-top: 1px solid var(--border-color);
             border-radius: 24px 24px 0 0;
             padding: 24px;
@@ -486,7 +490,8 @@
             left: 0;
             right: 0;
             bottom: 0;
-            background: rgba(0, 0, 0, 0.5);
+            /* Reduced opacity for overlay for performance */
+            background: rgba(0, 0, 0, 0.4);
             opacity: 0;
             pointer-events: none;
             transition: opacity 0.3s ease;
@@ -707,7 +712,8 @@
         let isRecording = false;
         let isPlaying = false;
         let recordedBeats = [];
-        let playbackInterval = null;
+        // schedule-based playback uses a single timeout rather than a fast interval.
+        let playbackTimeout = null;
         let startRecordTime = null;
         let currentTheme = localStorage.getItem('tapBeatsTheme') || 'dark';
 
@@ -817,18 +823,44 @@
         function playTone(frequency) {
             const oscillator = audioContext.createOscillator();
             const gainNode = audioContext.createGain();
-            
+
             oscillator.type = settings.waveform;
             oscillator.frequency.value = frequency;
-            
+
             gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
             gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + (settings.decay / 1000));
-            
+
             oscillator.connect(gainNode);
             gainNode.connect(masterGain);
-            
+
             oscillator.start();
             oscillator.stop(audioContext.currentTime + (settings.decay / 1000));
+        }
+
+        // Schedule a tone to play at a specific delay (ms) relative to now.
+        function scheduleTone(freq, delayMs) {
+            const osc = audioContext.createOscillator();
+            const gain = audioContext.createGain();
+            osc.type = settings.waveform;
+            osc.frequency.value = freq;
+            const startTime = audioContext.currentTime + (delayMs / 1000);
+            gain.gain.setValueAtTime(0.3, startTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, startTime + (settings.decay / 1000));
+            osc.connect(gain);
+            gain.connect(masterGain);
+            osc.start(startTime);
+            osc.stop(startTime + (settings.decay / 1000));
+        }
+
+        // Trigger the pad visual state for the given index.  This function
+        // isolates the DOM manipulation and ensures the active class is removed.
+        function flashPad(index) {
+            const pad = document.querySelector(`[data-index="${index}"]`);
+            if (!pad) return;
+            pad.classList.add('active');
+            setTimeout(() => {
+                pad.classList.remove('active');
+            }, 150);
         }
 
         // Recording Functions
@@ -865,47 +897,43 @@
                 showToast('⚠️ Nothing to play');
                 return;
             }
-            
+
             if (!isAudioUnlocked) {
                 showToast('⚡ Please start audio first');
                 return;
             }
-            
+
             isPlaying = true;
             document.getElementById('playIcon').textContent = '■';
             document.getElementById('playBtn').classList.add('playing');
-            
+
             const loopDuration = getLoopDuration();
-            let loopStartTime = Date.now();
-            
-            showToast('▶️ Playing loop...');
-            
-            playbackInterval = setInterval(() => {
-                const currentTime = (Date.now() - loopStartTime) % loopDuration;
-                
-                recordedBeats.forEach(beat => {
-                    if (Math.abs(currentTime - beat.timestamp) < 50) {
-                        const pad = document.querySelector(`[data-index="${beat.padIndex}"]`);
-                        if (pad) {
-                            pad.classList.add('active');
-                            setTimeout(() => pad.classList.remove('active'), 150);
-                        }
-                        playTone(beat.frequency);
-                    }
+            // recursive scheduler to loop playback precisely using timeouts
+            const scheduleLoop = () => {
+                recordedBeats.forEach((beat) => {
+                    // schedule audio using audioContext time to avoid drift
+                    scheduleTone(beat.frequency, beat.timestamp);
+                    // schedule visual flash
+                    setTimeout(() => flashPad(beat.padIndex), beat.timestamp);
                 });
-            }, 50);
+                // schedule next loop after loopDuration
+                playbackTimeout = setTimeout(scheduleLoop, loopDuration);
+            };
+
+            showToast('▶️ Playing loop...');
+            scheduleLoop();
         }
 
         function stopPlayback() {
             isPlaying = false;
             document.getElementById('playIcon').textContent = '▶';
             document.getElementById('playBtn').classList.remove('playing');
-            
-            if (playbackInterval) {
-                clearInterval(playbackInterval);
-                playbackInterval = null;
+
+            if (playbackTimeout) {
+                clearTimeout(playbackTimeout);
+                playbackTimeout = null;
             }
-            
+
             showToast('⏹️ Stopped');
         }
 
